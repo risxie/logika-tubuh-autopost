@@ -1,0 +1,33 @@
+name: Post ke Instagram
+on:
+  workflow_dispatch:
+    inputs:
+      post_dir:
+        description: "Folder konten, mis. queue/001-salam-kenal"
+        required: true
+      dry_run:
+        description: "Cek saja, jangan posting"
+        type: boolean
+        default: true
+permissions:
+  contents: write
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    environment: ig-publish   # tambahkan Required reviewers = kamu, jadi tiap run menunggu klik Approve
+    steps:
+      - uses: actions/checkout@v4
+      - name: Posting
+        env:
+          IG_TOKEN: ${{ secrets.IG_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="--dry-run"; fi
+          python3 publish.py "${{ inputs.post_dir }}" $ARGS
+      - name: Catat hasil
+        if: ${{ inputs.dry_run != true }}
+        run: |
+          git config user.name "autopost"; git config user.email "autopost@users.noreply.github.com"
+          git add "${{ inputs.post_dir }}/posted.json"
+          git commit -m "posted: ${{ inputs.post_dir }}" && git push
