@@ -52,7 +52,9 @@ def main():
     d = pathlib.Path(a.post_dir)
     cap = (d / "caption.txt").read_text(encoding="utf-8").strip()
     meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
-    img = d / "image.jpg"
+    reels = meta.get("type") == "REELS"
+    img = d / ("cover.jpg" if reels else "image.jpg")
+    vid = d / "video.mp4"
     posted = d / "posted.json"
 
     if posted.exists(): die(f"sudah pernah diposting: {posted.read_text()}")
@@ -61,18 +63,24 @@ def main():
     if len(cap) > 2200: die("caption lebih dari 2200 karakter")
     w, h = jpeg_size(img)
     ratio = w / h
-    if not (0.8 <= ratio <= 1.91): die(f"rasio {w}x{h} di luar 4:5 .. 1.91:1")
-    print(f"OK  gambar {w}x{h}, caption {len(cap)} karakter")
+    if reels:
+        if not vid.exists(): die("video.mp4 tidak ada")
+        if vid.stat().st_size > 300_000_000: die("video > 300MB")
+        if meta.get("needs_final_audio"): die('meta "needs_final_audio": true — VO final belum dipasang')
+        if not (0.5 <= ratio <= 0.6): die(f"cover {w}x{h} bukan 9:16")
+    elif not (0.8 <= ratio <= 1.91): die(f"rasio {w}x{h} di luar 4:5 .. 1.91:1")
+    print(f"OK  {'reels' if reels else 'gambar'} {w}x{h}, caption {len(cap)} karakter")
 
     repo = os.environ.get("GITHUB_REPOSITORY", "OWNER/REPO")
     ref = os.environ.get("GITHUB_SHA") or os.environ.get("GITHUB_REF_NAME", "main")
-    url = f"https://raw.githubusercontent.com/{repo}/{ref}/{d.as_posix()}/image.jpg"
+    media = "video.mp4" if reels else "image.jpg"
+    url = f"https://raw.githubusercontent.com/{repo}/{ref}/{d.as_posix()}/{media}"
     print("URL gambar:", url)
     if not a.skip_url_check:
         try:
             r = urllib.request.urlopen(url, timeout=30)
             ct = r.headers.get("Content-Type", "")
-            if r.status != 200 or "image" not in ct: die(f"URL tidak valid ({r.status}, {ct})")
+            if r.status != 200 or ("video" if reels else "image") not in ct: die(f"URL tidak valid ({r.status}, {ct})")
             print("OK  URL gambar bisa diakses publik")
         except urllib.error.URLError as e:
             die(f"URL gambar tidak bisa diakses: {e} (repo harus publik dan file sudah di-push)")
@@ -82,17 +90,22 @@ def main():
     if not meta.get("approved"): die('meta.json belum "approved": true')
 
     uid = os.environ.get("IG_USER_ID") or die("IG_USER_ID belum diisi")
-    p = {"image_url": url, "caption": cap}
-    if meta.get("alt_text"): p["alt_text"] = meta["alt_text"]
+    if reels:
+        p = {"media_type": "REELS", "video_url": url, "caption": cap, "share_to_feed": "true"}
+        cu = f"https://raw.githubusercontent.com/{repo}/{ref}/{d.as_posix()}/cover.jpg"
+        p["cover_url"] = cu
+    else:
+        p = {"image_url": url, "caption": cap}
+        if meta.get("alt_text"): p["alt_text"] = meta["alt_text"]
     c = call("POST", f"{uid}/media", p)["id"]
     print("container dibuat:", c)
-    for _ in range(30):
+    for _ in range(60):
         s = call("GET", c, {"fields": "status_code,status"})
         if s.get("status_code") == "FINISHED": break
         if s.get("status_code") in ("ERROR", "EXPIRED"): die(f"container gagal: {s}")
         time.sleep(4)
     else:
-        die("container belum FINISHED setelah 2 menit")
+        die("container belum FINISHED setelah 4 menit")
     mid = call("POST", f"{uid}/media_publish", {"creation_id": c})["id"]
     info = call("GET", mid, {"fields": "permalink,timestamp"})
     posted.write_text(json.dumps({"media_id": mid, **info}, indent=2))
