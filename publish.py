@@ -80,7 +80,9 @@ def main():
         try:
             r = urllib.request.urlopen(url, timeout=30)
             ct = r.headers.get("Content-Type", "")
-            if r.status != 200 or ("video" if reels else "image") not in ct: die(f"URL tidak valid ({r.status}, {ct})")
+            head = r.read(16)
+            ok_type = ("video" in ct or (ct == "application/octet-stream" and head[4:8] == b"ftyp")) if reels else ("image" in ct)
+            if r.status != 200 or not ok_type: die(f"URL tidak valid ({r.status}, {ct})")
             print("OK  URL gambar bisa diakses publik")
         except urllib.error.URLError as e:
             die(f"URL gambar tidak bisa diakses: {e} (repo harus publik dan file sudah di-push)")
