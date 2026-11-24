@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       post_dir:
-        description: "Folder konten, mis. queue/001-salam-kenal"
+        description: "Folder konten (gambar tunggal atau carousel), mis. queue/002-lutut-krek"
         required: true
       dry_run:
         description: "Cek saja, jangan posting"

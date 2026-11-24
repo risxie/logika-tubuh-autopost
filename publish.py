@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Posting 1 gambar ke Instagram lewat Graph API, dengan pengaman.
+"""Posting 1 gambar ATAU carousel ke Instagram lewat Graph API, dengan pengaman.
+Folder konten:
+  - gambar tunggal : image.jpg
+  - carousel       : slide-01.jpg, slide-02.jpg, ... (2 sampai 10 file JPEG, ukuran sama)
+  meta.json (opsional untuk carousel): "alt_texts": ["alt slide 1", "alt slide 2", ...]
 Pakai:  python publish.py queue/001-salam-kenal [--dry-run] [--skip-url-check]
 Env:    IG_TOKEN (secret), IG_USER_ID, GITHUB_REPOSITORY, GITHUB_SHA/GITHUB_REF_NAME
 Token TIDAK PERNAH dicetak. Tanpa --dry-run, meta.json harus "approved": true.
@@ -9,7 +13,8 @@ import argparse, json, os, pathlib, struct, sys, time, urllib.error, urllib.pars
 HOST = os.environ.get("IG_GRAPH_HOST", "https://graph.facebook.com")
 VER = os.environ.get("IG_GRAPH_VERSION", "v23.0")
 DISCLAIMER = "Info ini bersifat edukasi umum"
-HASHTAG = "#logikatubuh"
+HASHTAG = "#logikatubuh"  # dicek tanpa membedakan huruf besar/kecil
+MAX_SLIDES = 10
 
 def die(msg):
     print("ERROR:", msg); sys.exit(1)
@@ -52,47 +57,89 @@ def main():
     d = pathlib.Path(a.post_dir)
     cap = (d / "caption.txt").read_text(encoding="utf-8").strip()
     meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
-    img = d / "image.jpg"
+    slides = sorted(d.glob("slide-*.jpg"))
+    single = d / "image.jpg"
+    if slides and single.exists():
+        die("folder berisi image.jpg DAN slide-*.jpg, pilih salah satu")
+    if slides:
+        if not (2 <= len(slides) <= MAX_SLIDES):
+            die(f"carousel harus 2 sampai {MAX_SLIDES} slide, ditemukan {len(slides)}")
+        files = slides
+    elif single.exists():
+        files = [single]
+    else:
+        die("tidak ada image.jpg maupun slide-*.jpg di folder")
+    carousel = len(files) > 1
     posted = d / "posted.json"
 
     if posted.exists(): die(f"sudah pernah diposting: {posted.read_text()}")
     if DISCLAIMER not in cap: die("caption wajib memuat disclaimer edukasi umum")
-    if HASHTAG not in cap: die("caption wajib memuat #logikatubuh")
+    if HASHTAG not in cap.lower(): die("caption wajib memuat #logikatubuh")
     if len(cap) > 2200: die("caption lebih dari 2200 karakter")
-    w, h = jpeg_size(img)
-    ratio = w / h
-    if not (0.8 <= ratio <= 1.91): die(f"rasio {w}x{h} di luar 4:5 .. 1.91:1")
-    print(f"OK  gambar {w}x{h}, caption {len(cap)} karakter")
+    if cap.count("#") > 30: die("caption lebih dari 30 hashtag")
+
+    sizes = [jpeg_size(f) for f in files]
+    for f, (w, h) in zip(files, sizes):
+        if not (0.8 <= w / h <= 1.91): die(f"{f.name}: rasio {w}x{h} di luar 4:5 .. 1.91:1")
+    if len(set(sizes)) > 1:
+        die("semua slide carousel harus berukuran sama: " + ", ".join(f"{f.name}={w}x{h}" for f, (w, h) in zip(files, sizes)))
+    w, h = sizes[0]
+    kind = f"carousel {len(files)} slide" if carousel else "gambar tunggal"
+    print(f"OK  {kind}, {w}x{h}, caption {len(cap)} karakter")
+
+    alts = meta.get("alt_texts") or []
+    if alts and len(alts) != len(files):
+        die(f"alt_texts berisi {len(alts)} item, jumlah slide {len(files)}")
 
     repo = os.environ.get("GITHUB_REPOSITORY", "OWNER/REPO")
     ref = os.environ.get("GITHUB_SHA") or os.environ.get("GITHUB_REF_NAME", "main")
-    url = f"https://raw.githubusercontent.com/{repo}/{ref}/{d.as_posix()}/image.jpg"
-    print("URL gambar:", url)
+    urls = [f"https://raw.githubusercontent.com/{repo}/{ref}/{d.as_posix()}/{f.name}" for f in files]
+    print("URL pertama:", urls[0])
     if not a.skip_url_check:
-        try:
-            r = urllib.request.urlopen(url, timeout=30)
-            ct = r.headers.get("Content-Type", "")
-            if r.status != 200 or "image" not in ct: die(f"URL tidak valid ({r.status}, {ct})")
-            print("OK  URL gambar bisa diakses publik")
-        except urllib.error.URLError as e:
-            die(f"URL gambar tidak bisa diakses: {e} (repo harus publik dan file sudah di-push)")
+        for u in urls:
+            try:
+                r = urllib.request.urlopen(u, timeout=30)
+                ct = r.headers.get("Content-Type", "")
+                if r.status != 200 or "image" not in ct: die(f"URL tidak valid ({r.status}, {ct}): {u}")
+            except urllib.error.URLError as e:
+                die(f"URL gambar tidak bisa diakses: {u} ({e}). Repo harus publik dan file sudah di-push")
+        print(f"OK  {len(urls)} URL gambar bisa diakses publik")
 
     if a.dry_run:
         print("DRY RUN selesai. Tidak ada yang diposting."); return
     if not meta.get("approved"): die('meta.json belum "approved": true')
 
     uid = os.environ.get("IG_USER_ID") or die("IG_USER_ID belum diisi")
-    p = {"image_url": url, "caption": cap}
-    if meta.get("alt_text"): p["alt_text"] = meta["alt_text"]
-    c = call("POST", f"{uid}/media", p)["id"]
-    print("container dibuat:", c)
-    for _ in range(30):
-        s = call("GET", c, {"fields": "status_code,status"})
-        if s.get("status_code") == "FINISHED": break
-        if s.get("status_code") in ("ERROR", "EXPIRED"): die(f"container gagal: {s}")
-        time.sleep(4)
+
+    def wait_finished(cid, what):
+        for _ in range(30):
+            s = call("GET", cid, {"fields": "status_code,status"})
+            if s.get("status_code") == "FINISHED": return
+            if s.get("status_code") in ("ERROR", "EXPIRED"): die(f"{what} gagal: {s}")
+            time.sleep(4)
+        die(f"{what} belum FINISHED setelah 2 menit")
+
+    if carousel:
+        kids = []
+        for i, u in enumerate(urls):
+            p = {"image_url": u, "is_carousel_item": "true"}
+            if alts and alts[i]: p["alt_text"] = alts[i]
+            kid = call("POST", f"{uid}/media", p)["id"]
+            kids.append(kid)
+            print(f"slide {i + 1}/{len(urls)} dibuat:", kid)
+        for i, kid in enumerate(kids):
+            wait_finished(kid, f"slide {i + 1}")
+        c = call("POST", f"{uid}/media", {"media_type": "CAROUSEL", "children": ",".join(kids), "caption": cap})["id"]
+        print("container carousel dibuat:", c)
+        wait_finished(c, "container carousel")
     else:
-        die("container belum FINISHED setelah 2 menit")
+        p = {"image_url": urls[0], "caption": cap}
+        alt = (alts[0] if alts else None) or meta.get("alt_text")
+        if alt: p["alt_text"] = alt
+        c = call("POST", f"{uid}/media", p)["id"]
+        print("container dibuat:", c)
+        wait_finished(c, "container")
+
     mid = call("POST", f"{uid}/media_publish", {"creation_id": c})["id"]
     info = call("GET", mid, {"fields": "permalink,timestamp"})
     posted.write_text(json.dumps({"media_id": mid, **info}, indent=2))
